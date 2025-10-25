@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>語言測驗設定與產出工具 (多語別一致)</title>
+    <title>語言測驗設定與產出工具 (修復離線運行)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- SheetJS CDN for parsing Excel/CSV files -->
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
@@ -174,32 +174,58 @@
         import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
-        setLogLevel('Debug');
+        // 核心 Firebase 變數 - 修正點：檢查變數是否存在，不存在則切換到本地模式。
+        const isImmersiveEnv = typeof __firebase_config !== 'undefined' && __firebase_config !== "";
 
-        // 核心 Firebase 變數 - 這些變數由 Canvas 環境自動提供，用於連接到內建 Firestore 資料庫。
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const appId = isImmersiveEnv ? (typeof __app_id !== 'undefined' ? __app_id : 'default-app-id') : 'local-app-id';
+        const firebaseConfig = isImmersiveEnv ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = isImmersiveEnv ? (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null) : null;
+        
+        // 全域變數用於在 App 啟動後儲存資料
+        window.isLocalMode = !isImmersiveEnv; // *** 新增：本地模式旗標 ***
+        window.currentSheetsData = {}; 
+        window.currentSheetNames = []; 
+        window.currentConfig = {}; 
+        window.allGeneratedQuizzes = {}; 
+        window.commonWordsPool = []; 
 
         let db = null;
         let auth = null;
         let userId = null;
 
-        // 全域變數用於在 App 啟動後儲存資料
-        window.currentSheetsData = {}; // 原始解析的詞彙資料 { sheetName: [word, ...] }
-        window.currentSheetNames = []; // 所有工作表名稱
-        window.currentConfig = {}; // 儲存的設定
-        window.allGeneratedQuizzes = {}; // 儲存所有語別生成的測驗結果 { sheetName: { questions: '...', answers: '...' }, ... }
-        window.commonWordsPool = []; // 儲存所有語別共有的詞彙池
+        if (isImmersiveEnv) {
+            setLogLevel('Debug');
+        }
 
         // Helper 函式來取得 Firestore 路徑
         function getUserDocPath(docId) {
-            // 私有資料路徑: /artifacts/{appId}/users/{userId}/data/{docId}
-            return `artifacts/${appId}/users/${userId}/data/${docId}`;
+            // 在本地模式下，此函式不應被呼叫，因此僅在非本地模式下返回路徑
+            if (!window.isLocalMode) {
+               return `artifacts/${appId}/users/${userId}/data/${docId}`;
+            }
+            return null;
         }
 
         // 初始化 Firebase 和認證
         async function initializeFirebase() {
+            document.getElementById('app-id-display').textContent = appId;
+            
+            if (window.isLocalMode) {
+                // *** 本地模式邏輯 ***
+                userId = 'LOCAL_USER_' + Math.random().toString(36).substring(2, 8).toUpperCase();
+                document.getElementById('user-id-display').textContent = userId;
+                document.getElementById('db-status-display').textContent = '本地模式 (無資料庫連線)';
+                document.getElementById('db-status-display').className = 'text-orange-600 font-bold';
+                document.getElementById('upload-message').textContent = '資料庫已禁用，數據將不會被保存。';
+                document.getElementById('config-message').textContent = '資料庫已禁用，設定將不會被保存。';
+                
+                // 設定預設配置
+                window.currentConfig = { cnToTribeTotal: 5, tribeToCnTotal: 5, totalQuestions: 10 };
+                loadConfigToUI(window.currentConfig);
+                return; // 終止 Firebase 初始化
+            }
+            
+            // *** 雲端環境 Firebase 初始化邏輯 ***
             if (!firebaseConfig) {
                 document.getElementById('db-status-display').textContent = '錯誤: Firebase 設定遺失';
                 return;
@@ -210,19 +236,15 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                document.getElementById('app-id-display').textContent = appId;
-
                 await new Promise((resolve) => {
-                    // 監聽認證狀態變化
                     onAuthStateChanged(auth, async (user) => {
                         if (user) {
                             userId = user.uid;
                             document.getElementById('user-id-display').textContent = userId;
                             document.getElementById('db-status-display').textContent = '已登入並連線至資料庫。';
-                            window.db = db; // 供其他模組使用
+                            window.db = db; 
                             resolve();
                         } else {
-                            // 嘗試使用自定義 token 登入，如果沒有則匿名登入
                             if (initialAuthToken) {
                                 await signInWithCustomToken(auth, initialAuthToken);
                             } else {
@@ -232,7 +254,6 @@
                     });
                 });
                 
-                // 設置 Firestore 監聽器以載入數據和設定
                 setupFirestoreListeners();
 
             } catch (error) {
@@ -243,6 +264,8 @@
 
         // 監聽器：從 Firestore 讀取設定和詞彙資料
         function setupFirestoreListeners() {
+            if (window.isLocalMode) return; // 本地模式跳過監聽
+
             if (!db || !userId) {
                 console.error("Firestore 或 User ID 尚未準備好。");
                 return;
@@ -272,13 +295,10 @@
                     const data = docSnap.data();
                     
                     try {
-                        // 確保 sheetsData.sheets 是一個 JSON 字符串，需要解析
                         const sheets = JSON.parse(data.sheets);
                         window.currentSheetsData = sheets;
                         window.currentSheetNames = Object.keys(sheets).filter(name => sheets[name].length > 0);
                         updateWordListUI(sheets);
-                        
-                        // 計算共同詞彙池
                         window.commonWordsPool = calculateCommonWords(sheets);
 
                         document.getElementById('upload-message').textContent = `資料已於 ${new Date(data.timestamp.toDate()).toLocaleTimeString()} 載入。共偵測到 ${window.currentSheetNames.length} 個語別。`;
@@ -299,7 +319,6 @@
                     document.getElementById('word-list-area').classList.add('hidden');
                 }
                 
-                // 更新共同詞彙狀態
                 updateCommonWordsStatus();
             }, (error) => {
                 console.error("監聽詞彙資料失敗:", error);
@@ -310,7 +329,6 @@
         initializeFirebase();
 
         // 將函式公開到全域 window 物件，以便從 HTML 呼叫
-        // 這些函式將在下方定義
         window.uploadAndParseFile = uploadAndParseFile;
         window.saveConfig = saveConfig;
         window.generateQuiz = generateQuiz;
@@ -321,36 +339,28 @@
         
         /**
          * 計算所有工作表中共有的詞彙序號。
-         * @param {Object} sheetsData - 所有工作表的詞彙資料
-         * @returns {Array<Object>} 包含 commonIndex 和 chinese 的共同詞彙陣列
          */
         function calculateCommonWords(sheetsData) {
             const sheetNames = Object.keys(sheetsData).filter(name => sheetsData[name].length > 0);
             if (sheetNames.length === 0) return [];
 
-            // 1. 建立第一個工作表的 index 映射 (用作基準)
             const firstSheet = sheetsData[sheetNames[0]];
-            const commonMap = new Map(); // key: index, value: {chinese: '...'}
+            const commonMap = new Map(); 
             
             firstSheet.forEach(word => {
                 const index = word.index;
-                // 確保 index 和 chinese 存在且非空
                 if (index && word.chinese) {
                     commonMap.set(index, { chinese: word.chinese, index: index });
                 }
             });
 
-            // 2. 與所有後續工作表進行交集操作
             for (let i = 1; i < sheetNames.length; i++) {
                 const currentSheet = sheetsData[sheetNames[i]];
-                
-                // 修正邏輯: 必須先過濾 (filter) 出有效的詞彙物件，再用 map 取得其 index
                 const currentIndices = new Set(currentSheet
-                    .filter(word => word.index && word.chinese) // 確保詞彙的 index 和中文內容存在
-                    .map(word => word.index) // 映射到序號
+                    .filter(word => word.index && word.chinese)
+                    .map(word => word.index)
                 );
 
-                // 移除 commonMap 中不存在於 currentIndices 的 index
                 for (const index of commonMap.keys()) {
                     if (!currentIndices.has(index)) {
                         commonMap.delete(index);
@@ -358,7 +368,6 @@
                 }
             }
 
-            // 3. 轉換為陣列並返回 (按 index 排序，以便在 UI 中顯示)
             const commonWords = Array.from(commonMap.values());
             commonWords.sort((a, b) => {
                 const indexA = isNaN(parseInt(a.index)) ? a.index : parseInt(a.index);
@@ -421,7 +430,6 @@
             for (let i = 1; i < sheetData.length; i++) {
                 const row = sheetData[i];
                 // 讀取指定欄位: 序號(0), 中文(2), 族語(3), 級別(5)
-                // 檢查至少有中文(2)、族語(3)和級別(5)三個欄位，且序號(0)存在
                 if (row.length < 6 || !row[0] || !row[2] || !row[3] || !row[5]) continue; 
 
                 const index = String(row[0] || '').trim();
@@ -431,7 +439,7 @@
 
                 if (chinese && tribe && index) {
                     wordList.push({
-                        index, // 使用 index 作為唯一識別碼 (序號)
+                        index, 
                         chinese,
                         tribe,
                         level,
@@ -476,15 +484,27 @@
                     if (Object.keys(sheetsData).length === 0 || totalWords === 0) {
                         throw new Error('檔案中沒有可用的工作表或詞彙。');
                     }
+                    
+                    // *** 修正點：本地模式儲存於記憶體，不呼叫 Firebase ***
+                    if (window.isLocalMode) {
+                        window.currentSheetsData = sheetsData;
+                        window.currentSheetNames = Object.keys(sheetsData).filter(name => sheetsData[name].length > 0);
+                        updateWordListUI(sheetsData);
+                        window.commonWordsPool = calculateCommonWords(sheetsData);
+                        updateCommonWordsStatus();
+                        
+                        document.getElementById('upload-message').textContent = `檔案 '${file.name}' 解析成功！總詞彙數 ${totalWords} 筆。 (資料未存入資料庫)`;
+                        document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-orange-600';
+                        return;
+                    }
 
-                    // 將解析後的資料儲存到 Firestore
+
+                    // 雲端環境：將解析後的資料儲存到 Firestore
                     const docData = {
                         timestamp: new Date(),
-                        // 儲存前必須將 sheetsData 序列化為 JSON 字符串
                         sheets: JSON.stringify(sheetsData) 
                     };
 
-                    // *** 修正後的 setDoc 呼叫 ***
                     await setDoc(doc(db, getUserDocPath('sheetsData')), docData);
 
                     document.getElementById('upload-message').textContent = `檔案 '${file.name}' 上傳並解析成功！總詞彙數 ${totalWords} 筆。`;
@@ -508,7 +528,6 @@
                 const listLength = wordList.length;
                 let previewHtml = '';
 
-                // 顯示第一筆資料 (索引 0)
                 if (listLength > 0) {
                     const firstWord = wordList[0];
                     previewHtml += `<div class="p-2 border-b text-sm text-gray-600">
@@ -517,7 +536,6 @@
                     </div>`;
                 }
 
-                // 顯示最後一筆資料 (索引 length - 1)
                 if (listLength > 1) {
                     const lastWord = wordList[listLength - 1];
                     previewHtml += `<div class="p-2 text-sm text-gray-600">
@@ -545,11 +563,6 @@
         }
 
         async function saveConfig() {
-            if (!db || !userId) {
-                showAlert('錯誤', 'Firebase 尚未連線，請稍候再試。');
-                return;
-            }
-            
             if (window.currentSheetNames.length === 0) {
                  showAlert('錯誤', '請先上傳包含詞彙的檔案！');
                  return;
@@ -557,7 +570,6 @@
 
             const cnToTribeTotal = getConfigInput('cn-to-tribe-total');
             const tribeToCnTotal = getConfigInput('tribe-to-cn-total');
-            
             const totalQuestions = cnToTribeTotal + tribeToCnTotal;
 
             const configData = {
@@ -566,7 +578,21 @@
                 tribeToCnTotal,
                 totalQuestions
             };
-
+            
+            // *** 修正點：本地模式儲存於記憶體，不呼叫 Firebase ***
+            if (window.isLocalMode) {
+                 window.currentConfig = configData;
+                 document.getElementById('config-message').textContent = `設定已儲存於記憶體！總共預計 ${totalQuestions} 題。 (資料未存入資料庫)`;
+                 document.getElementById('config-message').className = 'mt-3 text-sm font-medium text-orange-600';
+                 return;
+            }
+            
+            // 雲端環境：儲存到 Firestore
+            if (!db || !userId) {
+                showAlert('錯誤', 'Firebase 尚未連線，請稍候再試。');
+                return;
+            }
+            
             try {
                 await setDoc(doc(db, getUserDocPath('config')), configData);
                 document.getElementById('config-message').textContent = `設定已成功儲存！總共預計 ${totalQuestions} 題。`;
@@ -641,7 +667,6 @@
             // 如果抽取出來的詞彙總數小於請求數，且還有剩餘未分配
             if (cnToTribeCount + tribeToCnCount < totalWordsToSelect) {
                  const remaining = totalWordsToSelect - (cnToTribeCount + tribeToCnCount);
-                 // 將剩餘詞彙平均分給兩類，或優先給需求量較大的
                  const cnNeeded = requiredCnToTribe - cnToTribeCount;
                  const tribeNeeded = requiredTribeToCn - tribeToCnCount;
 
@@ -667,9 +692,7 @@
 
 
             // 3. 將抽選的詞彙分組 (按序號排序，以確保題目一致)
-            // 將 selectedCommonWords 依原序號 index 排序
             selectedCommonWords.sort((a, b) => {
-                // 嘗試將 index 轉換為數字進行排序，如果失敗則用字串排序
                 const indexA = isNaN(parseInt(a.index)) ? a.index : parseInt(a.index);
                 const indexB = isNaN(parseInt(b.index)) ? b.index : parseInt(b.index);
                 if (indexA < indexB) return -1;
@@ -681,43 +704,38 @@
             const tribeToCnWords = selectedCommonWords.slice(finalCnToTribe, finalCount);
             
             // 4. 為每個語別生成測驗內容
-            const quizDetails = {}; // 儲存所有語別的題目和答案
+            const quizDetails = {}; 
             
             sheetNames.forEach(sheetName => {
                 const sheetWordList = sheetsData[sheetName];
-                // 建立該語別的 index 快速查詢 Map
                 const wordMap = new Map(sheetWordList.map(word => [word.index, word]));
 
                 const cnToTribeQuiz = cnToTribeWords.map(commonWord => {
-                    // 使用該語別的詞彙 (如果存在)
                     const word = wordMap.get(commonWord.index) || { tribe: '【無對應】', level: 'N/A', originalLevel: 'N/A' }; 
                     return {
                         type: '中文翻族語',
-                        index: commonWord.index, // 題目序號使用共同詞彙的
-                        question: commonWord.chinese, // 使用共同詞彙的中文
-                        answer: word.tribe, // 使用該語別的族語
+                        index: commonWord.index, 
+                        question: commonWord.chinese, 
+                        answer: word.tribe, 
                         level: word.originalLevel || word.level,
                         sheet: sheetName
                     };
                 });
 
                 const tribeToCnQuiz = tribeToCnWords.map(commonWord => {
-                    // 使用該語別的詞彙 (如果存在)
                     const word = wordMap.get(commonWord.index) || { tribe: '【無對應】', level: 'N/A', originalLevel: 'N/A' }; 
                     return {
                         type: '族語翻中文',
-                        index: commonWord.index, // 題目序號使用共同詞彙的
-                        question: word.tribe, // 使用該語別的族語
-                        answer: commonWord.chinese, // 使用共同詞彙的中文
+                        index: commonWord.index, 
+                        question: word.tribe, 
+                        answer: commonWord.chinese, 
                         level: word.originalLevel || word.level,
                         sheet: sheetName
                     };
                 });
                 
-                // 將兩組題目合併 (不隨機排序，確保題目類型和編號一致)
                 const finalQuiz = [...cnToTribeQuiz, ...tribeToCnQuiz];
                 
-                // 產生 Markdown 內容
                 const questionContent = generateMarkdownContent(finalQuiz, sheetName, warnings, true);
                 const answerContent = generateMarkdownContent(finalQuiz, sheetName, warnings, false);
                 
@@ -732,11 +750,6 @@
 
         /**
          * 產生 Word 友善的純文字/Markdown 內容 (已分組編號)
-         * @param {Array<Object>} quiz - 測驗題目陣列 (已按題型分組)
-         * @param {string} selectedLanguage - 選擇的語別名稱
-         * @param {Array<string>} warnings - 警告訊息陣列
-         * @param {boolean} isQuestionSheet - 是否為題目卷 (True) 或答案卷 (False)
-         * @returns {string} 
          */
         function generateMarkdownContent(quiz, selectedLanguage, warnings, isQuestionSheet) {
             const date = new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -749,7 +762,7 @@
             content += `- 總題目數: ${quiz.length} 題\n\n`;
             
             if (isQuestionSheet) {
-                // *** NEW: 題目卷格式提醒 ***
+                // *** 題目卷格式提醒 (應使用者要求) ***
                 content += `--- 
 【匯出格式提醒】
 請將下方內容貼至 Word 文件後，務必將 **所有文字設定為「標楷體, 14pt」**。
@@ -762,7 +775,6 @@
                 content += warnings.map(w => `- ${w}`).join('\n') + '\n\n';
             }
 
-            // 1. 分類題目 (題目已經在 generateQuiz 內部按題型順序排列: CN→Tribe, 然後 Tribe→CN)
             const cnToTribeQuiz = quiz.filter(q => q.type === '中文翻族語');
             const tribeToCnQuiz = quiz.filter(q => q.type === '族語翻中文');
 
@@ -783,7 +795,6 @@
                     if (isQuestionSheet) {
                         content += `${qNum}. ${q.question} ___________\n`;
                     } else {
-                        // 答案卷: 1. 中文詞彙 → 族語答案 (原序號: 123)
                         content += `${qNum}. ${q.question} → ${q.answer} (原序號: ${q.index})\n`;
                     }
                 });
@@ -799,7 +810,6 @@
                     if (isQuestionSheet) {
                         content += `${qNum}. ${q.question} ___________\n`;
                     } else {
-                        // 答案卷: 1. 族語詞彙 → 中文答案 (原序號: 123)
                         content += `${qNum}. ${q.question} → ${q.answer} (原序號: ${q.index})\n`;
                     }
                 });
@@ -814,15 +824,12 @@
             const serialContainer = document.getElementById('serial-numbers-container');
             const selectEl = document.getElementById('export-language-select');
             
-            // 清空內容
             serialContainer.innerHTML = '';
             selectEl.innerHTML = '<option value="">-- 請選擇一個語別 --</option>'; 
             
-            // 顯示區塊
             document.getElementById('quiz-results-area').classList.remove('hidden');
             document.getElementById('export-area').classList.remove('hidden'); 
             
-            // 警告訊息
             if (warnings.length > 0) {
                 const warningHtml = `<div class="p-4 bg-yellow-100 text-yellow-800 border-l-4 border-yellow-500 rounded-lg mb-4 col-span-3">
                     <p class="font-bold mb-2">生成警告:</p>
@@ -831,7 +838,6 @@
                 document.getElementById('quiz-results-area').insertAdjacentHTML('afterbegin', warningHtml);
             }
 
-            // 共同詞彙列表
             selectedCommonWords.forEach((word) => {
                 serialContainer.insertAdjacentHTML('beforeend', `
                     <div class="p-1 rounded bg-gray-50 hover:bg-indigo-100 transition duration-100">
@@ -841,13 +847,11 @@
                 `);
             });
             
-            // 匯出語別選擇器
             sheetNames.forEach(sheetName => {
                 const option = `<option value="${sheetName}">${sheetName}</option>`;
                 selectEl.insertAdjacentHTML('beforeend', option);
             });
             
-            // 預設選擇第一個語別 (如果存在)
             if (sheetNames.length > 0) {
                 selectEl.value = sheetNames[0];
                 displaySelectedQuiz();
