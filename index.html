@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>語言測驗設定與產出工具 (多語別一致)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- SheetJS CDN for parsing Excel/CSV files -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: 'Inter', 'Noto Sans TC', sans-serif; background-color: #f3ff6; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #e0e0e0; }
+        ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+        /* 隱藏原生捲軸但保持可捲動性 (針對 textarea) */
+        .markdown-output-area { -ms-overflow-style: none; scrollbar-width: none; }
+        .markdown-output-area::-webkit-scrollbar { display: none; }
+        
+        /* NEW: 題目卷輸出樣式，模擬「標楷體, 14pt」 */
+        .question-sheet-output {
+            /* 優先使用標楷體或類似字體 */
+            font-family: 'KaiTi', '標楷體', 'Noto Serif TC', serif; 
+            font-size: 14pt; /* 設定字號 */
+            line-height: 1.8; /* 增加行距以提高可讀性 */
+        }
+        /* 答案卷輸出樣式 (維持簡潔) */
+        .answer-sheet-output {
+             font-family: 'Inter', 'Noto Sans TC', sans-serif;
+             font-size: 12pt;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-6xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl space-y-8">
+        <h1 class="text-3xl font-extrabold text-indigo-700 text-center border-b-4 border-indigo-200 pb-3 mb-6">
+            族語詞彙測驗配置與生成工具 (多語別一致)
+        </h1>
+        
+        <!-- 狀態顯示區 -->
+        <div id="status-area" class="text-sm bg-gray-100 p-3 rounded-lg flex flex-wrap justify-between items-center text-gray-700">
+            <p><span class="font-semibold">App ID:</span> <span id="app-id-display">載入中...</span></p>
+            <p><span class="font-semibold">User ID:</span> <span id="user-id-display" class="break-all">載入中...</span></p>
+            <p><span class="font-semibold">DB 狀態:</span> <span id="db-status-display" class="text-red-500 font-bold">未連線</span></p>
+        </div>
+
+        <!-- 1. 檔案上傳與解析 -->
+        <div class="bg-blue-50 p-6 rounded-lg shadow-md border-t-4 border-blue-500">
+            <h2 class="text-2xl font-semibold text-blue-800 mb-4">1. 上傳詞彙表 (XLSX/CSV)</h2>
+            <p class="text-sm text-gray-600 mb-4">
+                請確保您的檔案包含以下欄位（系統將跳過第一行標題列）：<br/>
+                <span class="font-bold text-red-600">第一欄 (序號)、第三欄 (中文)、第四欄 (族語)、第六欄 (級別)</span><br/>
+                **不同工作表 (Sheet) 將被視為不同的語別。**
+            </p>
+            <input type="file" id="file-input" accept=".xlsx,.xls,.csv" class="mb-4 block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-white focus:outline-none">
+            <button id="upload-button" onclick="uploadAndParseFile()" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition duration-200 shadow-md">
+                上傳並解析
+            </button>
+            <p id="upload-message" class="mt-3 text-sm font-medium"></p>
+
+            <!-- 詞彙預覽區 -->
+            <div id="word-list-area" class="mt-6 border-t pt-4 hidden">
+                <h3 class="text-xl font-semibold text-gray-700 mb-3">已偵測語別與範例詞彙</h3>
+                <div id="sheet-preview-container" class="space-y-4">
+                    <!-- 預覽內容將由 JS 載入 -->
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. 測驗題目總數量設定 -->
+        <div class="bg-indigo-50 p-6 rounded-lg shadow-md border-t-4 border-indigo-500">
+            <h2 class="text-2xl font-semibold text-indigo-800 mb-4">2. 測驗題目總數量設定</h2>
+            <p class="text-sm text-gray-600 mb-4">
+                系統將從**所有語別共有的詞彙序號**中隨機選取足夠的題目。<br/>
+                **注意:** 若詞彙數量不足，將以實際可選題數為準。
+            </p>
+            
+            <div id="language-status" class="mb-6 p-3 bg-indigo-100 rounded-lg text-sm text-indigo-800 font-medium hidden">
+                <!-- 顯示共同詞彙數 -->
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <!-- 中文翻族語 (CN to Tribe) -->
+                <div>
+                    <h3 class="font-bold text-lg text-indigo-700 mb-3">中文翻族語 (CN → Tribe)</h3>
+                    <div class="flex items-center space-x-2">
+                        <label for="cn-to-tribe-total" class="w-24 text-gray-600">設定總量:</label>
+                        <input type="number" id="cn-to-tribe-total" value="5" min="0" class="w-full border rounded-lg px-3 py-2">
+                    </div>
+                </div>
+
+                <!-- 族語翻中文 (Tribe to CN) -->
+                <div>
+                    <h3 class="font-bold text-lg text-indigo-700 mb-3">族語翻中文 (Tribe → CN)</h3>
+                    <div class="flex items-center space-x-2">
+                        <label for="tribe-to-cn-total" class="w-24 text-gray-600">設定總量:</label>
+                        <input type="number" id="tribe-to-cn-total" value="5" min="0" class="w-full border rounded-lg px-3 py-2">
+                    </div>
+                </div>
+            </div>
+
+            <button onclick="saveConfig()" class="mt-6 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 rounded-lg transition duration-200 shadow-md">
+                儲存設定
+            </button>
+            <p id="config-message" class="mt-3 text-sm font-medium"></p>
+        </div>
+        
+        <!-- 3. 產出測驗題目 -->
+        <div class="bg-green-50 p-6 rounded-xl shadow-md border-t-4 border-green-500">
+            <h2 class="text-2xl font-semibold text-green-800 mb-4">3. 產出測驗題目 (多語別同時生成)</h2>
+            <p class="text-sm text-gray-600 mb-4">將根據上述設定的總數量，從所有語別共有的詞彙中隨機抽取題目，並為每個語別生成獨立測驗。</p>
+            <button onclick="generateQuiz()" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 rounded-lg transition duration-200 shadow-md transform hover:scale-[1.01]">
+                生成所有語別測驗
+            </button>
+            <p id="generation-message" class="mt-3 text-sm font-medium"></p>
+            
+            <!-- 測驗結果顯示區 -->
+            <div id="quiz-results-area" class="mt-6 border-t pt-4 hidden">
+                <h3 class="text-xl font-semibold text-gray-700 mb-3">共同抽出題目列表 (依原序號排序)</h3>
+                
+                <!-- A. 序號顯示區 -->
+                <div class="bg-white p-4 rounded-xl shadow-lg border-l-4 border-indigo-500 max-h-[300px] overflow-y-auto mb-6">
+                    <h4 class="text-lg font-bold text-indigo-700 mb-3">本次測驗使用的詞彙原序號及中文詞彙</h4>
+                    <div id="serial-numbers-container" class="space-y-1 grid grid-cols-2 md:grid-cols-4 gap-x-4">
+                        <!-- 序號將在此處載入 -->
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- NEW: 匯出區塊 (題目卷 & 答案卷) -->
+            <div id="export-area" class="mt-10 border-t pt-6 hidden bg-purple-50 p-6 rounded-xl">
+                <h3 class="text-2xl font-semibold text-purple-800 mb-4">4. 匯出測驗文件 (Word 友善格式)</h3>
+                <p class="text-sm text-gray-600 mb-4">請選擇您要匯出的語別，並複製對應的題目卷與答案卷。</p>
+                
+                <!-- 語別選擇器 -->
+                <div class="mb-6">
+                    <h4 class="font-bold text-lg text-purple-700 mb-3">選擇要匯出的語別</h4>
+                    <select id="export-language-select" onchange="displaySelectedQuiz()" class="w-full md:w-1/2 border rounded-lg px-3 py-2 bg-white shadow-sm focus:ring-purple-500 focus:border-purple-500">
+                        <option value="">-- 請先生成測驗 --</option>
+                    </select>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- 題目卷 (使用新的 CSS 類別) -->
+                    <div class="bg-white p-4 rounded-lg shadow-md border-l-4 border-purple-500">
+                        <h4 class="text-xl font-bold text-purple-700 mb-3">測驗題目卷 (供作答)</h4>
+                        <textarea id="markdown-output-questions" class="markdown-output-area question-sheet-output w-full h-64 p-4 border rounded-lg bg-gray-50 text-gray-700 resize-none shadow-inner" readonly placeholder="選擇語別後，此處將顯示題目卷內容..."></textarea>
+                        <button onclick="copyToClipboard('markdown-output-questions')" class="mt-3 w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-6 rounded-lg transition duration-200 shadow-lg">
+                            複製題目卷
+                        </button>
+                    </div>
+
+                    <!-- 答案卷 (使用新的 CSS 類別) -->
+                    <div class="bg-white p-4 rounded-lg shadow-md border-l-4 border-teal-500">
+                        <h4 class="text-xl font-bold text-teal-700 mb-3">測驗答案卷 (含解析)</h4>
+                        <textarea id="markdown-output-answers" class="markdown-output-area answer-sheet-output w-full h-64 p-4 border rounded-lg bg-gray-50 font-mono text-gray-700 resize-none shadow-inner" readonly placeholder="選擇語別後，此處將顯示答案卷內容..."></textarea>
+                        <button onclick="copyToClipboard('markdown-output-answers')" class="mt-3 w-full bg-teal-600 hover:bg-teal-700 text-white font-bold py-2 px-6 rounded-lg transition duration-200 shadow-lg">
+                            複製答案卷
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+
+    </div>
+
+    <!-- Firebase 初始化 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        setLogLevel('Debug');
+
+        // 核心 Firebase 變數 - 這些變數由 Canvas 環境自動提供，用於連接到內建 Firestore 資料庫。
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db = null;
+        let auth = null;
+        let userId = null;
+
+        // 全域變數用於在 App 啟動後儲存資料
+        window.currentSheetsData = {}; // 原始解析的詞彙資料 { sheetName: [word, ...] }
+        window.currentSheetNames = []; // 所有工作表名稱
+        window.currentConfig = {}; // 儲存的設定
+        window.allGeneratedQuizzes = {}; // 儲存所有語別生成的測驗結果 { sheetName: { questions: '...', answers: '...' }, ... }
+        window.commonWordsPool = []; // 儲存所有語別共有的詞彙池
+
+        // Helper 函式來取得 Firestore 路徑
+        function getUserDocPath(docId) {
+            // 私有資料路徑: /artifacts/{appId}/users/{userId}/data/{docId}
+            return `artifacts/${appId}/users/${userId}/data/${docId}`;
+        }
+
+        // 初始化 Firebase 和認證
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                document.getElementById('db-status-display').textContent = '錯誤: Firebase 設定遺失';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                document.getElementById('app-id-display').textContent = appId;
+
+                await new Promise((resolve) => {
+                    // 監聽認證狀態變化
+                    onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            document.getElementById('user-id-display').textContent = userId;
+                            document.getElementById('db-status-display').textContent = '已登入並連線至資料庫。';
+                            window.db = db; // 供其他模組使用
+                            resolve();
+                        } else {
+                            // 嘗試使用自定義 token 登入，如果沒有則匿名登入
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        }
+                    });
+                });
+                
+                // 設置 Firestore 監聽器以載入數據和設定
+                setupFirestoreListeners();
+
+            } catch (error) {
+                console.error("Firebase 初始化失敗:", error);
+                document.getElementById('db-status-display').textContent = `錯誤: ${error.message}`;
+            }
+        }
+
+        // 監聽器：從 Firestore 讀取設定和詞彙資料
+        function setupFirestoreListeners() {
+            if (!db || !userId) {
+                console.error("Firestore 或 User ID 尚未準備好。");
+                return;
+            }
+
+            // 1. 監聽設定檔
+            const configRef = doc(db, getUserDocPath('config'));
+            onSnapshot(configRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const config = docSnap.data();
+                    window.currentConfig = config;
+                    loadConfigToUI(config);
+                    document.getElementById('config-message').textContent = `設定已於 ${new Date(config.timestamp.toDate()).toLocaleTimeString()} 載入。總共預計 ${config.totalQuestions} 題。`;
+                    document.getElementById('config-message').className = 'mt-3 text-sm font-medium text-green-600';
+                } else {
+                    document.getElementById('config-message').textContent = '尚未儲存設定，使用預設值。';
+                    document.getElementById('config-message').className = 'mt-3 text-sm font-medium text-gray-500';
+                }
+            }, (error) => {
+                console.error("監聽設定失敗:", error);
+            });
+
+            // 2. 監聽詞彙資料 (sheetsData)
+            const dataRef = doc(db, getUserDocPath('sheetsData'));
+            onSnapshot(dataRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    
+                    try {
+                        // 確保 sheetsData.sheets 是一個 JSON 字符串，需要解析
+                        const sheets = JSON.parse(data.sheets);
+                        window.currentSheetsData = sheets;
+                        window.currentSheetNames = Object.keys(sheets).filter(name => sheets[name].length > 0);
+                        updateWordListUI(sheets);
+                        
+                        // 計算共同詞彙池
+                        window.commonWordsPool = calculateCommonWords(sheets);
+
+                        document.getElementById('upload-message').textContent = `資料已於 ${new Date(data.timestamp.toDate()).toLocaleTimeString()} 載入。共偵測到 ${window.currentSheetNames.length} 個語別。`;
+                        document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-blue-600';
+
+                    } catch(e) {
+                        console.error("解析 sheetsData 失敗:", e);
+                        document.getElementById('upload-message').textContent = '資料庫中的詞彙資料解析失敗。';
+                        document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-red-600';
+                    }
+
+                } else {
+                    window.currentSheetsData = {};
+                    window.currentSheetNames = [];
+                    window.commonWordsPool = [];
+                    document.getElementById('upload-message').textContent = '資料庫中無已儲存的詞彙資料。';
+                    document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-gray-500';
+                    document.getElementById('word-list-area').classList.add('hidden');
+                }
+                
+                // 更新共同詞彙狀態
+                updateCommonWordsStatus();
+            }, (error) => {
+                console.error("監聽詞彙資料失敗:", error);
+            });
+        }
+        
+        // 啟動 Firebase
+        initializeFirebase();
+
+        // 將函式公開到全域 window 物件，以便從 HTML 呼叫
+        // 這些函式將在下方定義
+        window.uploadAndParseFile = uploadAndParseFile;
+        window.saveConfig = saveConfig;
+        window.generateQuiz = generateQuiz;
+        window.copyToClipboard = copyToClipboard;
+        window.displaySelectedQuiz = displaySelectedQuiz; 
+        
+        // --- 共同詞彙計算與狀態更新 ---
+        
+        /**
+         * 計算所有工作表中共有的詞彙序號。
+         * @param {Object} sheetsData - 所有工作表的詞彙資料
+         * @returns {Array<Object>} 包含 commonIndex 和 chinese 的共同詞彙陣列
+         */
+        function calculateCommonWords(sheetsData) {
+            const sheetNames = Object.keys(sheetsData).filter(name => sheetsData[name].length > 0);
+            if (sheetNames.length === 0) return [];
+
+            // 1. 建立第一個工作表的 index 映射 (用作基準)
+            const firstSheet = sheetsData[sheetNames[0]];
+            const commonMap = new Map(); // key: index, value: {chinese: '...'}
+            
+            firstSheet.forEach(word => {
+                const index = word.index;
+                // 確保 index 和 chinese 存在且非空
+                if (index && word.chinese) {
+                    commonMap.set(index, { chinese: word.chinese, index: index });
+                }
+            });
+
+            // 2. 與所有後續工作表進行交集操作
+            for (let i = 1; i < sheetNames.length; i++) {
+                const currentSheet = sheetsData[sheetNames[i]];
+                
+                // 修正邏輯: 必須先過濾 (filter) 出有效的詞彙物件，再用 map 取得其 index
+                const currentIndices = new Set(currentSheet
+                    .filter(word => word.index && word.chinese) // 確保詞彙的 index 和中文內容存在
+                    .map(word => word.index) // 映射到序號
+                );
+
+                // 移除 commonMap 中不存在於 currentIndices 的 index
+                for (const index of commonMap.keys()) {
+                    if (!currentIndices.has(index)) {
+                        commonMap.delete(index);
+                    }
+                }
+            }
+
+            // 3. 轉換為陣列並返回 (按 index 排序，以便在 UI 中顯示)
+            const commonWords = Array.from(commonMap.values());
+            commonWords.sort((a, b) => {
+                const indexA = isNaN(parseInt(a.index)) ? a.index : parseInt(a.index);
+                const indexB = isNaN(parseInt(b.index)) ? b.index : parseInt(b.index);
+                if (indexA < indexB) return -1;
+                if (indexA > indexB) return 1;
+                return 0;
+            });
+            return commonWords;
+        }
+
+        function updateCommonWordsStatus() {
+            const statusEl = document.getElementById('language-status');
+            const sheetNames = window.currentSheetNames;
+            const commonCount = window.commonWordsPool.length;
+            
+            if (sheetNames.length > 0) {
+                statusEl.classList.remove('hidden');
+                let content = `已偵測到 **${sheetNames.length}** 個語別 (${sheetNames.join('、')})。`;
+                
+                if (sheetNames.length > 1) {
+                    content += `所有語別共同擁有的「序號」詞彙數量為 **${commonCount}** 筆。`;
+                } else if (sheetNames.length === 1) {
+                    content += `僅偵測到單一語別，總詞彙數為 **${commonCount}** 筆。`;
+                }
+                
+                statusEl.innerHTML = `<p class="font-bold">語別狀態:</p><p>${content}</p>`;
+            } else {
+                statusEl.classList.add('hidden');
+            }
+        }
+
+
+        // === 實用工具函式 ===
+        function copyToClipboard(elementId) {
+            const textarea = document.getElementById(elementId);
+            if (!textarea || !textarea.value) {
+                showAlert('錯誤', '沒有內容可以複製！請先選擇一個語別。');
+                return;
+            }
+            
+            textarea.select();
+            textarea.setSelectionRange(0, 99999);
+            try {
+                document.execCommand('copy');
+                showAlert('成功', '文件內容已複製到剪貼簿！現在可以貼到 Word 文件中。');
+            } catch (err) {
+                console.error('複製到剪貼簿失敗:', err);
+                showAlert('錯誤', '複製失敗，請手動複製上方文本框中的內容。');
+            }
+        }
+
+
+        // === 詞彙解析與儲存邏輯 (區塊 1) ===
+
+        function parseSheetData(sheetData) {
+            const wordList = [];
+            
+            // i = 1: 跳過第一行標題列
+            for (let i = 1; i < sheetData.length; i++) {
+                const row = sheetData[i];
+                // 讀取指定欄位: 序號(0), 中文(2), 族語(3), 級別(5)
+                // 檢查至少有中文(2)、族語(3)和級別(5)三個欄位，且序號(0)存在
+                if (row.length < 6 || !row[0] || !row[2] || !row[3] || !row[5]) continue; 
+
+                const index = String(row[0] || '').trim();
+                const chinese = String(row[2]).trim();
+                const tribe = String(row[3]).trim();
+                const level = String(row[5]).replace(/\s/g, '').trim(); 
+
+                if (chinese && tribe && index) {
+                    wordList.push({
+                        index, // 使用 index 作為唯一識別碼 (序號)
+                        chinese,
+                        tribe,
+                        level,
+                        originalLevel: level 
+                    });
+                }
+            }
+            return wordList;
+        }
+
+        async function uploadAndParseFile() {
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+            if (!file) {
+                showAlert('錯誤', '請先選擇一個檔案！');
+                return;
+            }
+
+            document.getElementById('upload-message').textContent = '正在上傳並解析檔案...';
+            document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-gray-500';
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    
+                    const sheetsData = {};
+                    let totalWords = 0;
+
+                    for (const sheetName of workbook.SheetNames) {
+                        const worksheet = workbook.Sheets[sheetName];
+                        const sheetDataArray = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        
+                        const wordList = parseSheetData(sheetDataArray);
+                        if (wordList.length > 0) {
+                           sheetsData[sheetName] = wordList;
+                           totalWords += wordList.length;
+                        }
+                    }
+                    
+                    if (Object.keys(sheetsData).length === 0 || totalWords === 0) {
+                        throw new Error('檔案中沒有可用的工作表或詞彙。');
+                    }
+
+                    // 將解析後的資料儲存到 Firestore
+                    const docData = {
+                        timestamp: new Date(),
+                        // 儲存前必須將 sheetsData 序列化為 JSON 字符串
+                        sheets: JSON.stringify(sheetsData) 
+                    };
+
+                    // *** 修正後的 setDoc 呼叫 ***
+                    await setDoc(doc(db, getUserDocPath('sheetsData')), docData);
+
+                    document.getElementById('upload-message').textContent = `檔案 '${file.name}' 上傳並解析成功！總詞彙數 ${totalWords} 筆。`;
+                    document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-green-600';
+
+                } catch (error) {
+                    console.error("解析或儲存檔案失敗:", error);
+                    document.getElementById('upload-message').textContent = `處理檔案失敗: ${error.message}`;
+                    document.getElementById('upload-message').className = 'mt-3 text-sm font-medium text-red-600';
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function updateWordListUI(sheets) {
+            const container = document.getElementById('sheet-preview-container');
+            container.innerHTML = '';
+            document.getElementById('word-list-area').classList.remove('hidden');
+            
+            for (const [sheetName, wordList] of Object.entries(sheets)) {
+                const listLength = wordList.length;
+                let previewHtml = '';
+
+                // 顯示第一筆資料 (索引 0)
+                if (listLength > 0) {
+                    const firstWord = wordList[0];
+                    previewHtml += `<div class="p-2 border-b text-sm text-gray-600">
+                        <span class="font-bold">#${firstWord.index} (首筆):</span> 
+                        ${firstWord.chinese} → ${firstWord.tribe}
+                    </div>`;
+                }
+
+                // 顯示最後一筆資料 (索引 length - 1)
+                if (listLength > 1) {
+                    const lastWord = wordList[listLength - 1];
+                    previewHtml += `<div class="p-2 text-sm text-gray-600">
+                        <span class="font-bold">#${lastWord.index} (末筆):</span> 
+                        ${lastWord.chinese} → ${lastWord.tribe}
+                    </div>`;
+                }
+
+                const sheetElement = `
+                    <div class="bg-white p-4 rounded-lg shadow border-l-4 border-gray-400">
+                        <p class="font-bold text-gray-800 mb-2">語別工作表: ${sheetName} (${listLength} 筆有效詞彙)</p>
+                        ${previewHtml || '<p class="text-sm text-red-500">此工作表無有效詞彙。</p>'}
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', sheetElement);
+            }
+        }
+
+
+        // === 設定儲存與載入邏輯 (區塊 2) ===
+
+        function getConfigInput(id) {
+            const inputEl = document.getElementById(id);
+            return inputEl ? parseInt(inputEl.value, 10) || 0 : 0;
+        }
+
+        async function saveConfig() {
+            if (!db || !userId) {
+                showAlert('錯誤', 'Firebase 尚未連線，請稍候再試。');
+                return;
+            }
+            
+            if (window.currentSheetNames.length === 0) {
+                 showAlert('錯誤', '請先上傳包含詞彙的檔案！');
+                 return;
+            }
+
+            const cnToTribeTotal = getConfigInput('cn-to-tribe-total');
+            const tribeToCnTotal = getConfigInput('tribe-to-cn-total');
+            
+            const totalQuestions = cnToTribeTotal + tribeToCnTotal;
+
+            const configData = {
+                timestamp: new Date(),
+                cnToTribeTotal,
+                tribeToCnTotal,
+                totalQuestions
+            };
+
+            try {
+                await setDoc(doc(db, getUserDocPath('config')), configData);
+                document.getElementById('config-message').textContent = `設定已成功儲存！總共預計 ${totalQuestions} 題。`;
+                document.getElementById('config-message').className = 'mt-3 text-sm font-medium text-green-600';
+            } catch (error) {
+                console.error("儲存設定失敗:", error);
+                document.getElementById('config-message').textContent = `儲存設定失敗: ${error.message}`;
+                document.getElementById('config-message').className = 'mt-3 text-sm font-medium text-red-600';
+            }
+        }
+
+        function loadConfigToUI(config) {
+            document.getElementById('cn-to-tribe-total').value = config.cnToTribeTotal || 5;
+            document.getElementById('tribe-to-cn-total').value = config.tribeToCnTotal || 5;
+        }
+
+
+        // === 測驗生成與匯出邏輯 (區塊 3) ===
+
+        function getRandomElements(arr, num) {
+            if (num >= arr.length) return arr;
+            const shuffled = [...arr].sort(() => 0.5 - Math.random());
+            return shuffled.slice(0, num);
+        }
+
+        function generateQuiz() {
+            const config = window.currentConfig;
+            const sheetsData = window.currentSheetsData;
+            const commonWordsPool = window.commonWordsPool;
+            
+            // 重置狀態
+            window.allGeneratedQuizzes = {};
+            document.getElementById('generation-message').textContent = '';
+            document.getElementById('quiz-results-area').classList.add('hidden');
+            document.getElementById('export-area').classList.add('hidden'); 
+            document.getElementById('serial-numbers-container').innerHTML = '';
+            document.getElementById('export-language-select').innerHTML = '<option value="">-- 請先生成測驗 --</option>';
+
+            const sheetNames = window.currentSheetNames;
+            
+            if (sheetNames.length === 0 || commonWordsPool.length === 0) {
+                document.getElementById('generation-message').textContent = '錯誤: 請先上傳檔案，並確保至少有共同詞彙可用來生成測驗題目。';
+                document.getElementById('generation-message').className = 'mt-3 text-sm font-medium text-red-600';
+                return;
+            }
+            
+            const requiredCnToTribe = config.cnToTribeTotal || 0;
+            const requiredTribeToCn = config.tribeToCnTotal || 0;
+            const requiredTotal = requiredCnToTribe + requiredTribeToCn;
+            
+            const commonTotal = commonWordsPool.length;
+            const warnings = [];
+
+            if (requiredTotal === 0) {
+                 document.getElementById('generation-message').textContent = '請設定中文翻族語或族語翻中文的題目數量。';
+                 document.getElementById('generation-message').className = 'mt-3 text-sm font-medium text-red-600';
+                 return;
+            }
+            
+            if (requiredTotal > commonTotal) {
+                warnings.push(`警告: 總計請求 ${requiredTotal} 題，但所有語別共同詞彙僅有 ${commonTotal} 筆。`);
+            }
+            
+            // 1. 從共同詞彙池中隨機抽取**一組**詞彙 (根據 index)
+            const totalWordsToSelect = Math.min(requiredTotal, commonTotal);
+            const selectedCommonWords = getRandomElements(commonWordsPool, totalWordsToSelect);
+            
+            // 2. 決定題型分配 (確保兩類型都有足夠的詞彙)
+            let cnToTribeCount = Math.min(requiredCnToTribe, totalWordsToSelect);
+            let tribeToCnCount = Math.min(requiredTribeToCn, totalWordsToSelect - cnToTribeCount);
+
+            // 如果抽取出來的詞彙總數小於請求數，且還有剩餘未分配
+            if (cnToTribeCount + tribeToCnCount < totalWordsToSelect) {
+                 const remaining = totalWordsToSelect - (cnToTribeCount + tribeToCnCount);
+                 // 將剩餘詞彙平均分給兩類，或優先給需求量較大的
+                 const cnNeeded = requiredCnToTribe - cnToTribeCount;
+                 const tribeNeeded = requiredTribeToCn - tribeToCnCount;
+
+                 if (cnNeeded > 0) {
+                     const giveToCn = Math.min(cnNeeded, remaining);
+                     cnToTribeCount += giveToCn;
+                 } else if (tribeNeeded > 0) {
+                     const giveToTribe = Math.min(tribeNeeded, remaining);
+                     tribeToCnCount += giveToTribe;
+                 }
+            }
+
+            // 確保題數總和不超過實際抽取的詞彙數
+            const finalCnToTribe = cnToTribeCount;
+            const finalTribeToCn = tribeToCnCount;
+            const finalCount = finalCnToTribe + finalTribeToCn;
+            
+            if (finalCount === 0) {
+                 document.getElementById('generation-message').textContent = '錯誤: 共同詞彙數量不足以生成任何題目。';
+                 document.getElementById('generation-message').className = 'mt-3 text-sm font-medium text-red-600';
+                 return;
+            }
+
+
+            // 3. 將抽選的詞彙分組 (按序號排序，以確保題目一致)
+            // 將 selectedCommonWords 依原序號 index 排序
+            selectedCommonWords.sort((a, b) => {
+                // 嘗試將 index 轉換為數字進行排序，如果失敗則用字串排序
+                const indexA = isNaN(parseInt(a.index)) ? a.index : parseInt(a.index);
+                const indexB = isNaN(parseInt(b.index)) ? b.index : parseInt(b.index);
+                if (indexA < indexB) return -1;
+                if (indexA > indexB) return 1;
+                return 0;
+            });
+            
+            const cnToTribeWords = selectedCommonWords.slice(0, finalCnToTribe);
+            const tribeToCnWords = selectedCommonWords.slice(finalCnToTribe, finalCount);
+            
+            // 4. 為每個語別生成測驗內容
+            const quizDetails = {}; // 儲存所有語別的題目和答案
+            
+            sheetNames.forEach(sheetName => {
+                const sheetWordList = sheetsData[sheetName];
+                // 建立該語別的 index 快速查詢 Map
+                const wordMap = new Map(sheetWordList.map(word => [word.index, word]));
+
+                const cnToTribeQuiz = cnToTribeWords.map(commonWord => {
+                    // 使用該語別的詞彙 (如果存在)
+                    const word = wordMap.get(commonWord.index) || { tribe: '【無對應】', level: 'N/A', originalLevel: 'N/A' }; 
+                    return {
+                        type: '中文翻族語',
+                        index: commonWord.index, // 題目序號使用共同詞彙的
+                        question: commonWord.chinese, // 使用共同詞彙的中文
+                        answer: word.tribe, // 使用該語別的族語
+                        level: word.originalLevel || word.level,
+                        sheet: sheetName
+                    };
+                });
+
+                const tribeToCnQuiz = tribeToCnWords.map(commonWord => {
+                    // 使用該語別的詞彙 (如果存在)
+                    const word = wordMap.get(commonWord.index) || { tribe: '【無對應】', level: 'N/A', originalLevel: 'N/A' }; 
+                    return {
+                        type: '族語翻中文',
+                        index: commonWord.index, // 題目序號使用共同詞彙的
+                        question: word.tribe, // 使用該語別的族語
+                        answer: commonWord.chinese, // 使用共同詞彙的中文
+                        level: word.originalLevel || word.level,
+                        sheet: sheetName
+                    };
+                });
+                
+                // 將兩組題目合併 (不隨機排序，確保題目類型和編號一致)
+                const finalQuiz = [...cnToTribeQuiz, ...tribeToCnQuiz];
+                
+                // 產生 Markdown 內容
+                const questionContent = generateMarkdownContent(finalQuiz, sheetName, warnings, true);
+                const answerContent = generateMarkdownContent(finalQuiz, sheetName, warnings, false);
+                
+                window.allGeneratedQuizzes[sheetName] = { questionContent, answerContent, finalQuiz };
+            });
+
+            document.getElementById('generation-message').textContent = `所有語別測驗生成成功！共生成 ${finalCount} 題 (CN→Tribe: ${finalCnToTribe} 題, Tribe→CN: ${finalTribeToCn} 題)。請在下方選擇語別進行匯出。`;
+            document.getElementById('generation-message').className = 'mt-3 text-sm font-medium text-green-600';
+            
+            renderQuizResults(selectedCommonWords, warnings, sheetNames);
+        }
+
+        /**
+         * 產生 Word 友善的純文字/Markdown 內容 (已分組編號)
+         * @param {Array<Object>} quiz - 測驗題目陣列 (已按題型分組)
+         * @param {string} selectedLanguage - 選擇的語別名稱
+         * @param {Array<string>} warnings - 警告訊息陣列
+         * @param {boolean} isQuestionSheet - 是否為題目卷 (True) 或答案卷 (False)
+         * @returns {string} 
+         */
+        function generateMarkdownContent(quiz, selectedLanguage, warnings, isQuestionSheet) {
+            const date = new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: 'long', day: 'numeric' });
+            
+            const titlePrefix = isQuestionSheet ? "題目卷" : "答案卷";
+            let content = `# ${selectedLanguage} 詞彙測驗 - ${titlePrefix}\n\n`;
+            content += `## 測驗資訊\n`;
+            content += `- 生成日期: ${date}\n`;
+            content += `- 語別: ${selectedLanguage}\n`;
+            content += `- 總題目數: ${quiz.length} 題\n\n`;
+            
+            if (isQuestionSheet) {
+                // *** NEW: 題目卷格式提醒 ***
+                content += `--- 
+【匯出格式提醒】
+請將下方內容貼至 Word 文件後，務必將 **所有文字設定為「標楷體, 14pt」**。
+---
+\n\n`;
+            }
+
+            if (warnings.length > 0) {
+                content += `--- 警告 ---\n`;
+                content += warnings.map(w => `- ${w}`).join('\n') + '\n\n';
+            }
+
+            // 1. 分類題目 (題目已經在 generateQuiz 內部按題型順序排列: CN→Tribe, 然後 Tribe→CN)
+            const cnToTribeQuiz = quiz.filter(q => q.type === '中文翻族語');
+            const tribeToCnQuiz = quiz.filter(q => q.type === '族語翻中文');
+
+            // --- 題目/答案部分 ---
+            if (isQuestionSheet) {
+                content += `--- 請在橫線上作答 ---\n\n`;
+            } else {
+                content += `--- 答案與解析部分 ---\n\n`;
+            }
+
+
+            // 1A. 中文翻族語 (CN to Tribe)
+            if (cnToTribeQuiz.length > 0) {
+                content += `## 一、中文翻族語 (中文 → ${selectedLanguage}) (共 ${cnToTribeQuiz.length} 題)\n`;
+                cnToTribeQuiz.forEach((q, index) => {
+                    const qNum = index + 1;
+                    
+                    if (isQuestionSheet) {
+                        content += `${qNum}. ${q.question} ___________\n`;
+                    } else {
+                        // 答案卷: 1. 中文詞彙 → 族語答案 (原序號: 123)
+                        content += `${qNum}. ${q.question} → ${q.answer} (原序號: ${q.index})\n`;
+                    }
+                });
+                content += '\n'; 
+            }
+
+            // 1B. 族語翻中文 (Tribe to CN)
+            if (tribeToCnQuiz.length > 0) {
+                content += `## 二、族語翻中文 (${selectedLanguage} → 中文) (共 ${tribeToCnQuiz.length} 題)\n`;
+                tribeToCnQuiz.forEach((q, index) => {
+                    const qNum = index + 1;
+                    
+                    if (isQuestionSheet) {
+                        content += `${qNum}. ${q.question} ___________\n`;
+                    } else {
+                        // 答案卷: 1. 族語詞彙 → 中文答案 (原序號: 123)
+                        content += `${qNum}. ${q.question} → ${q.answer} (原序號: ${q.index})\n`;
+                    }
+                });
+                content += '\n'; 
+            }
+            
+            return content.trim();
+        }
+        
+        // 渲染結果 (僅顯示共同詞彙的序號列表)
+        function renderQuizResults(selectedCommonWords, warnings, sheetNames) {
+            const serialContainer = document.getElementById('serial-numbers-container');
+            const selectEl = document.getElementById('export-language-select');
+            
+            // 清空內容
+            serialContainer.innerHTML = '';
+            selectEl.innerHTML = '<option value="">-- 請選擇一個語別 --</option>'; 
+            
+            // 顯示區塊
+            document.getElementById('quiz-results-area').classList.remove('hidden');
+            document.getElementById('export-area').classList.remove('hidden'); 
+            
+            // 警告訊息
+            if (warnings.length > 0) {
+                const warningHtml = `<div class="p-4 bg-yellow-100 text-yellow-800 border-l-4 border-yellow-500 rounded-lg mb-4 col-span-3">
+                    <p class="font-bold mb-2">生成警告:</p>
+                    <ul class="list-disc list-inside space-y-1">${warnings.map(w => `<li>${w}</li>`).join('')}</ul>
+                </div>`;
+                document.getElementById('quiz-results-area').insertAdjacentHTML('afterbegin', warningHtml);
+            }
+
+            // 共同詞彙列表
+            selectedCommonWords.forEach((word) => {
+                serialContainer.insertAdjacentHTML('beforeend', `
+                    <div class="p-1 rounded bg-gray-50 hover:bg-indigo-100 transition duration-100">
+                        <span class="font-bold text-indigo-700">#${word.index}:</span> 
+                        ${word.chinese}
+                    </div>
+                `);
+            });
+            
+            // 匯出語別選擇器
+            sheetNames.forEach(sheetName => {
+                const option = `<option value="${sheetName}">${sheetName}</option>`;
+                selectEl.insertAdjacentHTML('beforeend', option);
+            });
+            
+            // 預設選擇第一個語別 (如果存在)
+            if (sheetNames.length > 0) {
+                selectEl.value = sheetNames[0];
+                displaySelectedQuiz();
+            }
+        }
+        
+        // 顯示選定語別的測驗內容
+        function displaySelectedQuiz() {
+            const selectEl = document.getElementById('export-language-select');
+            const selectedLanguage = selectEl.value;
+            const markdownOutputQuestions = document.getElementById('markdown-output-questions');
+            const markdownOutputAnswers = document.getElementById('markdown-output-answers');
+            
+            if (selectedLanguage && window.allGeneratedQuizzes[selectedLanguage]) {
+                const quizData = window.allGeneratedQuizzes[selectedLanguage];
+                markdownOutputQuestions.value = quizData.questionContent;
+                markdownOutputAnswers.value = quizData.answerContent;
+            } else {
+                markdownOutputQuestions.value = '請選擇一個語別以顯示內容。';
+                markdownOutputAnswers.value = '請選擇一個語別以顯示內容。';
+            }
+        }
+
+
+    </script>
+    
+    <!-- 模態框 (用於 alert/confirm 替代) -->
+    <div id="custom-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 hidden flex justify-center items-center">
+        <div class="bg-white p-6 rounded-lg shadow-xl w-80">
+            <h3 class="text-xl font-bold text-gray-800 mb-4" id="modal-title">訊息</h3>
+            <p class="text-gray-600 mb-6" id="modal-content">內容...</p>
+            <div class="flex justify-end space-x-3">
+                <button onclick="closeModal()" class="bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded transition duration-200">確定</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        function showAlert(title, message) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-content').textContent = message;
+            document.getElementById('custom-modal').classList.remove('hidden');
+        }
+        function closeModal() {
+            document.getElementById('custom-modal').classList.add('hidden');
+        }
+        window.alert = (msg) => showAlert('通知', msg);
+    </script>
+
+</body>
+</html>
